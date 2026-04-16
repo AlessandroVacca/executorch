@@ -111,6 +111,7 @@ set(_aoti_cuda_shim_sources runtime/shims/memory.cpp
 if(CMAKE_CUDA_COMPILER)
   list(APPEND _aoti_cuda_shim_sources runtime/shims/int4mm.cu
        runtime/shims/rand.cu
+       runtime/shims/sort.cu
   )
 endif()
 

@@ -146,6 +146,7 @@ class CudaBackend(AotiBackend, BackendDetails):
         return {
             "at::_ops::_weight_int4pack_mm::call": None,
             "aoti_torch_cuda_randint_low_out": None,
+            "at::_ops::sort_stable::call": None,
         }
 
     @classmethod
