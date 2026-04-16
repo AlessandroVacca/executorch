@@ -84,7 +84,7 @@ def _fused_moe_kernel(
     # Pointers
     A,  # [M, K] bf16 activations
     B,  # [E, N, K//2] int8 packed INT4 weights
-    C,  # [M, N] fp32 output (atomic accumulation across experts)
+    C,  # [M * top_k, N] bf16 output
     B_scale,  # [E, N, K//group_size] bf16 scales
     topk_ids,  # [M * top_k] int64 expert indices
     topk_weights,  # [M * top_k] float32 router weights
@@ -241,7 +241,6 @@ def _fused_moe_silu_kernel(
     group_size: tl.constexpr,
     BLOCK_SIZE_N: tl.constexpr,
     BLOCK_SIZE_K: tl.constexpr,
-    top_k: tl.constexpr,
     compute_type: tl.constexpr,
 ):
     """GEMM2 with fused SiLU activation.
@@ -336,13 +335,12 @@ def _fused_moe_silu_kernel(
         a_up_ptrs += BLOCK_SIZE_K * stride_ak
         b_ptrs += (BLOCK_SIZE_K // 2) * stride_bk
 
-    # Multiply by router weight and atomically accumulate into token row
+    # Multiply by router weight
     weight = tl.load(topk_weights + pair_idx)
     acc = acc * weight
 
-    token_idx = pair_idx // top_k
-    c_ptrs = C + token_idx * stride_cm + offs_n * stride_cn
-    tl.atomic_add(c_ptrs, acc, mask=n_mask)
+    c_ptrs = C + pair_idx * stride_cm + offs_n * stride_cn
+    tl.store(c_ptrs, acc.to(compute_type), mask=n_mask)
 
 
 # ---------------------------------------------------------------------------
@@ -430,8 +428,9 @@ def fused_moe(
     )
 
     # ---- GEMM2 with fused SiLU: reads gate+up from cache1, no intermediate buffer ----
-    # Zero-init FP32 buffer — atomic_add in the kernel accumulates across top_k experts
-    output = torch.zeros(M, N2, dtype=torch.float32, device=hidden_states.device)
+    cache3 = torch.empty(
+        num_pairs, N2, dtype=hidden_states.dtype, device=hidden_states.device
+    )
 
     def grid2(meta):
         return (num_pairs * triton.cdiv(N2, meta["BLOCK_SIZE_N"]),)
@@ -439,7 +438,7 @@ def fused_moe(
     wrap_triton(_fused_moe_silu_kernel)[grid2](
         cache1,
         w2,
-        output,
+        cache3,
         w2_scale,
         topk_ids_flat,
         topk_weights_flat,
@@ -451,17 +450,17 @@ def fused_moe(
         stride_be=w2.stride(0),
         stride_bk=w2.stride(2),
         stride_bn=w2.stride(1),
-        stride_cm=output.stride(0),
-        stride_cn=output.stride(1),
+        stride_cm=cache3.stride(0),
+        stride_cn=cache3.stride(1),
         stride_bse=w2_scale.stride(0),
         stride_bsk=w2_scale.stride(2),
         stride_bsn=w2_scale.stride(1),
         group_size=group_size,
-        top_k=top_k,
         compute_type=tl.bfloat16,
     )
 
-    return output.to(hidden_states.dtype)
+    # ---- Sum across top-k experts ----
+    return cache3.view(M, top_k, N2).sum(dim=1)
 
 
 @fused_moe.register_fake
