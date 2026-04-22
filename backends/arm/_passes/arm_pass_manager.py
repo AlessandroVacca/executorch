@@ -100,6 +100,7 @@ from executorch.backends.arm._passes import (
     DecorateFp32toInt32CastingPass,
     FoldAndAnnotateQParamsPass,
     FuseBatchNorm2dPass,
+    FuseConcatPass,
     FuseConsecutiveConcatShapesPass,
     FuseConsecutiveRescalesPass,
     FuseConstantArgsPass,
@@ -527,6 +528,7 @@ class ArmPassManager(PassManager):
         # Aten -> TOSA transformation passes
         self.add_passes(
             [
+                FuseConcatPass(),
                 RewriteUpsamplePass(),
                 RewriteMaxPool2dPass(),
                 RewriteConvPass(exported_program),
